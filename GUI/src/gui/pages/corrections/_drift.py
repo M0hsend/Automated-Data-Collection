@@ -59,7 +59,8 @@ class TranslateRegion(ShortCorrectionPage):
     _drift_scans: Spinbox
         Alias for `_limit` to maintain a clean global namespace for the DSL.
     """
-    drift = core.pyqtSignal(int, int)
+    # drift = core.pyqtSignal(int, int)
+    drift = core.pyqtSignal(float, float) #YX changing this to float
     # A new Qt signal defined to capture the updated Survey image
     updatedSurveyImage = core.pyqtSignal(images.RGBImage)
     SIZES = (256, 512, 1024, 2048, 4096, 8192, 16384)
@@ -120,6 +121,8 @@ class TranslateRegion(ShortCorrectionPage):
         self._regular.addWidget(self._drift_resolution)
         self._regular.addWidget(self._windowing)
         self._regular.addWidget(self._order)
+        
+        self.isEnabled = False # YX added 23Feb - default false not doing this corr
 
         self._calculated_shift = (0,0)
         self._shift = utils.SizeControl(0, 1, validation.examples.any_int)
@@ -139,7 +142,7 @@ class TranslateRegion(ShortCorrectionPage):
         """
         self._amount.increase()
 
-    def set_ref(self, tl: _tuple[int, int], br: _tuple[int, int]):
+    def set_ref(self, tl: _tuple[float, float], br: _tuple[float, float]): # changed int to float 4-2-26 ED
         """
         Method to set a reference image.
 
@@ -153,7 +156,7 @@ class TranslateRegion(ShortCorrectionPage):
             The bottom-right co-ordinate of the region.
         """
         self._region = utils.ScanRegion(tl, br[0] - tl[0], self._size)
-        self._ref = self._do_scan(0, 0)
+        self._ref = self._do_scan(float(0), float(0)) # chnaged to float from int 4-2-26 ED
         print(f"*****Size of the drift corr area: {self._ref.size}*****")
         self._amount.set_current(0)
         self._outputs[0, 0].draw(self._ref, resize=True)
@@ -163,14 +166,13 @@ class TranslateRegion(ShortCorrectionPage):
 
     def query(self):
         return self._amount.check()
-        
-
+    
     def _do_scan(self, x_shift: int, y_shift: int) -> images.RGBImage:
         if microscope.ONLINE:
             res = self._drift_resolution.focus.get_data()
             new_reg = self._region @ res
-            print(res)
-            print(new_reg)
+            #print(res)
+            #print(new_reg)
             top_left = new_reg[images.AABBCorner.TOP_LEFT]            
             area = microscope.AreaScan((res, res), (new_reg.size, new_reg.size), top_left)
             return self._scan(area, True).norm().dynamic().promote()
@@ -190,18 +192,18 @@ class TranslateRegion(ShortCorrectionPage):
 
     @utils.Tracked
     def run(self):
-        if not self.isEnabled():
+        if not self.isEnabled:
             return
         if self._ref is None:
             raise StagingError("drift correction", "exporting drift region")
         self.runStart.emit()
         x_shift, y_shift = map(int, self._shift.get_data())
-        print(f'x_shift, y_shift :  {x_shift, y_shift}' )
+        print(f'before shifting reference x_shift, y_shift :  {x_shift, y_shift}' )
 
 
         with self._link.subsystems["Detectors"].switch_inserted(True):
             print("££££$$$$~~~~ sleeping 2 s waiting for ADF detector")
-            time.sleep(2.5)        
+            #time.sleep(2.5)        # remoevd 5-2-26 ED 
             new = self._do_scan(x_shift, y_shift) # take new drift image: x_shift, y_shift are previous itteration measurements
             print('scan complete1')
         
@@ -268,24 +270,27 @@ class TranslateRegion(ShortCorrectionPage):
         corr, error, _ = convolve(ref_pad, new_pad) 
 
         shift = -corr
+        print(f'corr = {corr}')
         print(f"SHIFT MEASURED: {shift} - error:  {error} - phasediff: {_}")
 
-        # --- START ACCUMULATOR LOGIC ---
+        # # --- START ACCUMULATOR LOGIC ---
 
-        # 1. Calculate precise drift for THIS scan (Float) [dy, dx]
-        step_drift = shift * self.corr_scaling_factor
+        # # 1. Calculate precise drift for THIS scan (Float) [dy, dx]
+        # step_drift = shift * self.corr_scaling_factor
 
-        # 2. Add to accumulator (The "Bucket")
-        # This adds y to y, and x to x automatically
-        self._drift_accumulator += step_drift
+        # # 2. Add to accumulator (The "Bucket")
+        # # This adds y to y, and x to x automatically
+        # self._drift_accumulator += step_drift
 
-        # 3. Extract the integer part to apply now (Result is [int_y, int_x])
-        correction_app = self._drift_accumulator.astype(np.int_)
+        # # 3. Extract the integer part to apply now (Result is [int_y, int_x])
+        # correction_app = self._drift_accumulator.astype(np.int_)
 
-        # 4. Remove the applied integer from the bucket, leaving the decimal remainder
-        self._drift_accumulator -= correction_app
+        # # 4. Remove the applied integer from the bucket, leaving the decimal remainder
+        # self._drift_accumulator -= correction_app
 
-        # --- END ACCUMULATOR LOGIC ---
+        # # --- END ACCUMULATOR LOGIC ---
+        
+        correction_app = shift * self.corr_scaling_factor
 
         print(f"##### shift factor: {self.corr_scaling_factor} ######")
         print(f"##### updated shift (applied): {correction_app} | remainder: {self._drift_accumulator} ######")
@@ -313,7 +318,7 @@ class TranslateRegion(ShortCorrectionPage):
         #self._outputs[1, 1].draw(images.GreyImage.blank(overlap).norm(), resize=True)
         #self._outputs[1, 1].draw(overlap.downchannel(0, overlap.make_green(), invalid=images.ColourConvert.TO_FG).upchannel(), resize=True)
         # self._outputs[1, 1].draw( ,resize=True)  
-        self._shift.change_data(self._calculated_shift) # Added by YX 23May2025
+        self._shift.change_data((correction_app[1], correction_app[0])) #Edited by ED 6-2-26 self._calculated_shift) # Added by YX 23May2025
         
         self.drift.emit(correction_app[1], correction_app[0]) # YX 04Sept
 
@@ -321,12 +326,16 @@ class TranslateRegion(ShortCorrectionPage):
         # ---------------------------------------------------------------------
         # correction_app is [y, x], but move() expects (x, y)
         if self._region is not None:
-             self._region.move((correction_app[1], correction_app[0]))
-             print(f"Drift Scan Region moved by: {correction_app[1], correction_app[0]}")
+            print(f'region is {self._region}')
+            self._region.move((correction_app[1], correction_app[0]))
+            
+
+            print(f"Drift Scan Region moved by: {correction_app[1], correction_app[0]}")
         # ---------------------------------------------------------------------
         
         if microscope.ONLINE:
-            self._ref = new # update _ref image with new drift image
+            
+            # self._ref = new # update _ref image with new drift image
             # updatedSurveyImage = self._scan(
             #     microscope.AreaScan(self._o_size, self._o_size), True #,(0,0)
             #     ).norm().dynamic().promote()

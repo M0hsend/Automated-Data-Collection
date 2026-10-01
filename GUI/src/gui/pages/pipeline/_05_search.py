@@ -57,7 +57,8 @@ default_settings = load_settings("assets/config.json",
                                  scan_mode=validation.examples.any_bool,
                                  session=validation.examples.save_path,
                                  sample=validation.examples.save_path,
-                                 scan_resolution=validation.examples.resolution
+                                 scan_resolution=validation.examples.resolution,
+                                 size=validation.examples.resolution
                                  )
 
 
@@ -287,6 +288,7 @@ class DeepSearch(CanvasPage, SettingsPage[GridSettings], ProcessPage):
 
         def _survey_image() -> np.ndarray:
             return self._img(image.modified)
+        
 
         self._colour_option.hide()
         self._regions: _tuple[utils.ScanRegion, ...] = ()
@@ -394,7 +396,7 @@ class DeepSearch(CanvasPage, SettingsPage[GridSettings], ProcessPage):
         """
         self._resolution = new
 
-    def update_grids(self, x_shift: int, y_shift: int):
+    def update_grids(self, x_shift: float, y_shift: float):
         """
         Move all the scan regions, linked to drift correction.
 
@@ -478,6 +480,23 @@ class DeepSearch(CanvasPage, SettingsPage[GridSettings], ProcessPage):
     @utils.Stoppable.decorate(manager=ProcessPage.MANAGER)
     @utils.Tracked
     def _run(self, current: typing.Optional[int]):
+        def get_px_res(): # Added by ED: from Damien's function translated into Max OOP 
+            """
+            Given detector, will retrieve the magnification and output the resolution
+            Returns in Angstroms
+            """
+            
+            # THIS NEEDS FIXING TO GRAB CORRECTLY FROM MAX TM!
+            magnification = int(self._mic.subsystems["EOS"].magnification()) # error this subsystem has no GetMagValue
+        
+            #Get the pixels per meter value
+            detectorData = self._engine.get_detectorsetting()
+            ppmh = detectorData['OutputImageInformation']['PixelsPerMeter']['Horizontal']
+            pixel_size = 1 / (ppmh * magnification)
+            pixel_size *= 10**(10) # convert m to angstroms
+            self._resolutionA2p = pixel_size
+            return pixel_size
+        
         def _reg_scan():
             with self._mic.subsystems["Deflectors"].switch_blanked(False):
                 with self._mic.subsystems["Detectors"].switch_inserted(True):
@@ -497,6 +516,9 @@ class DeepSearch(CanvasPage, SettingsPage[GridSettings], ProcessPage):
                     f.create_dataset("Thresholded Image", data=self._pipeline())
                 if images_saved & utils.Stages.SURVEY:
                     f.create_dataset("Survey Scan", data=self._survey())
+                #if images_saved:
+                #    pixel_size = get_px_res() # Added by ED 6-2-26
+                #    f.create_dataset("Resolution Angstrom2pixel", data=pixel_size) # Added by ED 6-2-26
 
         def _merlin_scan():
             # time.sleep(1) # YX commenting this out
@@ -514,6 +536,11 @@ class DeepSearch(CanvasPage, SettingsPage[GridSettings], ProcessPage):
                 merlin_cmd.MPX_CMD(type_cmd='CMD', cmd='SCANSTARTRECORD')
                 time.sleep(1)
                 print('6')
+                # print("QD subscan region:", subscan_region)
+                # print("QD full resoltion:", full_image_size)
+                # print("QD flyback time:", self._scanner.flyback)
+                # print("QD dwell time:",self._scanner.dwell_time)
+                # print("QD trigger")
 
                 _ = self._scanner.scan(return_=False)
                 time.sleep(1) # YX changed from 1 to 0.001
@@ -555,7 +582,7 @@ class DeepSearch(CanvasPage, SettingsPage[GridSettings], ProcessPage):
             merlin_cmd.setValue('FILEDIRECTORY', save_path)
             merlin_cmd.setValue('FILEENABLE', 1)
             # trigger set up and filesaving
-            merlin_cmd.setValue('SAVEALLTOFILE', 1)
+            merlin_cmd.setValue('SAVEALLTOFILE', 1)  # can change this to spit out every DP individually, ie if you want to only do a few and run logic on
             merlin_cmd.setValue('USETIMESTAMPING', 1)
             # setting up VDF with STEM mode
             merlin_cmd.setValue('SCANX', px_val)
@@ -603,6 +630,23 @@ class DeepSearch(CanvasPage, SettingsPage[GridSettings], ProcessPage):
                     scan_area = microscope.AreaScan((self._resolution, self._resolution),
                                                     (px_val, px_val+1), top_left_4k) # Adding 1 extra lines 
                     
+                    # Adding logic to apply shift depending on the MAG:
+                        
+                    survey_mag = int(self._mic.subsystems["EOS"].magnification)
+                    print("SURVEY MAG:  ", survey_mag)
+                    if survey_mag == 150000:
+                        #### Applying an offset - YX & MD
+                        offset = 56
+                    elif survey_mag == 250000: # for 4M
+                        offset = 20
+                    elif survey_mag == 500000: # for 3M
+                        offset = 30
+                    else:
+                        offset = 0
+                    
+                    scan_area._l = scan_area._l - offset
+                    scan_area._r = scan_area._r - offset
+                    
                     print(f"from _05_search Line 597, scan_area: {scan_area._w, scan_area._h}")
                     with self._scanner.switch_scan_area(scan_area):
                         # print(f"******scan area: {scan_area.rect}******")
@@ -623,10 +667,19 @@ class DeepSearch(CanvasPage, SettingsPage[GridSettings], ProcessPage):
                         _file_write()
                         
                         if do_merlin:
-                            with h5py.File(params, "a") as co_ords:
-                                dset = co_ords.create_group("Co-ordinates (cartesian, non-scaled)")
-                                dset.attrs["top left"] = top_left
-                                dset.attrs["bottom right"] = bottom_right
+                            with h5py.File(params, "a") as _f:
+                                dset = _f.create_group("Co-ordinates (cartesian, non-scaled)")
+                                TL_x,TL_y = top_left
+                                BR_x, BR_y = bottom_right
+                                dset.attrs["top left"] = (TL_x,TL_y) 
+                                dset.attrs["bottom right"] = (BR_x,BR_y)
+                                
+                                
+                                dset = _f.create_group("Sampling")
+                                dset.attrs["Merlin_sampling"] = self._resolution
+                                dset.attrs["Survey_sampling"] = default_settings['size']
+                                
+                                
                             merlin_params = {'set_dwell_time(usec)': exposure, 'set_scan_px': px_val,
                                               'set_bit_depth': bit_depth}
                             self._mic.export(params, px_val, **merlin_params)

@@ -4,6 +4,7 @@ from typing import Tuple as _tuple
 import numpy as np
 import matplotlib.pyplot as plt
 import time
+from datetime import datetime
 try:
     from IPython.display import display, clear_output
     IPYTHON_AVAILABLE = True
@@ -15,6 +16,8 @@ from ..._base import images, microscope, ShortCorrectionPage
 from .... import load_settings, validation
 from ..._errors import *
 
+
+
 default_settings = load_settings("assets/config.json",
                                  focus_scans=validation.examples.focus,
                                  focus_change=validation.examples.focus_change,
@@ -23,6 +26,7 @@ default_settings = load_settings("assets/config.json",
                                  focus_limit=validation.examples.focus_limit_hex,
                                  focus_ROI=validation.examples.any_str,
                                  drift_resolution=validation.examples.resolution,
+                                 focus_offset=validation.examples.any_str
                                  )
 
 
@@ -117,7 +121,7 @@ class AutoFocus(ShortCorrectionPage):
         # self._regular.addWidget(self._tolerance)
 
         self._plot = utils.Canvas(survey_size)
-
+        self.isEnabled = False # YX added 23Feb - default false not doing this corr
         self._focus_change = self._df
         self._change_decay = self._decay
         self._focus_tolerance = self._tolerance
@@ -149,7 +153,7 @@ class AutoFocus(ShortCorrectionPage):
         Performs the autofocus routine using a Robust Multiresolution optimization.
         Includes Parabolic Fitting and Safety Rollback.
         """
-        if not self.isEnabled():
+        if not self.isEnabled:
             return
         self.runStart.emit()
 
@@ -175,6 +179,7 @@ class AutoFocus(ShortCorrectionPage):
                 
             # elif self.focus_corr_type = 'Python':
             link = self._link.subsystems["Lenses"]
+            def_per_bit = self._link.defocus_per_bit
 
             # --- Helper Functions ---
             def _norm_var(img_data: np.ndarray) -> float:
@@ -235,7 +240,8 @@ class AutoFocus(ShortCorrectionPage):
                 return vertex_x, vertex_y
 
             # --- Optimization Logic ---
-            def optimize_robust(coarse_range, fine_step, fine_window):
+            # Adding focus offset logic 5 March 2026 - MD
+            def optimize_robust(coarse_range, fine_step, fine_window, def_offset=None):
                 base_OLf = link.value
                 
                 # Setup Plot
@@ -386,11 +392,23 @@ class AutoFocus(ShortCorrectionPage):
                     display(fig)
                 else:
                     plt.show() # Final show
+                    fig = plt.gcf()
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    fig.savefig(f'/dls/e02/data/2026/mg44501-1/processing/Merlin/autofocus_figs/{timestamp}.png')
                 
                 # Final move
-                link.value = ideal_OLf
+                if def_offset == None:
+                    link.value = ideal_OLf
+                else:
+                    def_offset_val = float(def_offset)
+                    new_OLf = ideal_OLf + int(def_offset_val / def_per_bit)
+                    link.value = new_OLf
+                    print(f"APPLYING DEF OFFSET TO : {ideal_OLf:04X}")
+                    
+                    
 
             # --- Execution ---
+            # YX commenting out focus correction - not needed for NBED
             with link.switch_lens(microscope.Lens.OL_FINE):
                 with self._link.subsystems["Detectors"].switch_inserted(True):
                     print("££££$$$$~~~~ sleeping 2 s waiting for ADF detector")
@@ -407,7 +425,9 @@ class AutoFocus(ShortCorrectionPage):
                     # Fine window is the size of 2 coarse steps to ensure overlap
                     fine_window = coarse_step * 2
     
-                    optimize_robust(coarse_range, fine_step, fine_window)
+                    optimize_robust(coarse_range, fine_step, fine_window, def_offset=default_settings["focus_offset"])
+                    print("FOCUS OFFSET: ", default_settings["focus_offset"])
+                    
 
         self.runEnd.emit()
 
